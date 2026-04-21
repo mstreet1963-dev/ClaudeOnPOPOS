@@ -31,6 +31,15 @@ Flags:
 | `--user`    | `msdst`         | Windows username under `Users/`                  |
 | `--dry-run` | off             | print actions without writing                    |
 | `--force`   | off             | back up existing `--dest` and overwrite          |
+| `--from-pg` | off             | fetch the recovery plan from the PG function     |
+
+## Canonical recovery plan
+
+The PORTABLE / PORTABLE_REVIEW / SKIP lists and path-rewrite regexes
+are defined once in the PostgreSQL function
+`public.claude_env_recovery_plan(p_win_user text, p_lin_user text)`,
+which returns a `jsonb` manifest. The shell script mirrors that plan
+and can fetch the live version with `--from-pg` (requires `psql` + `jq`).
 
 ## What's copied vs skipped
 

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Recover a Claude Code environment from a Windows install onto Pop!_OS / Linux.
 #
+# Canonical recovery manifest lives in the PG function
+#   public.claude_env_recovery_plan(p_win_user text, p_lin_user text) -> jsonb
+# The PORTABLE / PORTABLE_REVIEW / SKIP arrays and the settings.json
+# path-rewrite regexes below mirror that function. When updating either,
+# keep them in sync, or run with --from-pg to fetch the live plan via psql.
+#
 # Expected source layout (on the mounted Windows drive):
 #   <SRC>/Users/msdst/.claude/{projects,sessions,todos,plans,plugins,hooks,
 #                              session-env,statsig,settings.json,
@@ -8,7 +14,7 @@
 #
 # Usage:
 #   ./recover-claude-env.sh --src "/run/media/$USER/255 GB Volume" [--dest "$HOME/.claude"]
-#                           [--user msdst] [--dry-run] [--force]
+#                           [--user msdst] [--dry-run] [--force] [--from-pg]
 
 set -euo pipefail
 
@@ -17,6 +23,7 @@ DEST="${HOME}/.claude"
 WIN_USER="msdst"
 DRY_RUN=0
 FORCE=0
+FROM_PG=0
 
 log()   { printf '\033[1;34m[info]\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m[warn]\033[0m %s\n' "$*" >&2; }
@@ -35,6 +42,7 @@ while (( $# )); do
         --user)    WIN_USER="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --force)   FORCE=1; shift ;;
+        --from-pg) FROM_PG=1; shift ;;
         -h|--help) usage 0 ;;
         *) err "unknown arg: $1"; usage 1 ;;
     esac
@@ -74,6 +82,9 @@ fi
 run "mkdir -p \"$DEST\""
 
 # ---------- what to copy ----------
+# Mirrors public.claude_env_recovery_plan(p_win_user, p_lin_user) -> jsonb.
+# With --from-pg these arrays are replaced at runtime with the live plan.
+#
 # Portable across OSes (per-user data, not machine-specific):
 PORTABLE=(
     projects        # session history per cwd; paths encode Windows cwd but data is preserved
@@ -100,6 +111,22 @@ SKIP=(
     telemetry
     .credentials.json  # DPAPI-sealed on Windows; re-auth on Linux
 )
+
+# ---------- optional: fetch plan from PG function (source of truth) ----------
+if (( FROM_PG )); then
+    command -v psql >/dev/null || { err "--from-pg requires psql on PATH"; exit 4; }
+    command -v jq   >/dev/null || { err "--from-pg requires jq on PATH";   exit 4; }
+    log "fetching plan from claude_env_recovery_plan('$WIN_USER','$USER')"
+    plan_json="$(psql -At -v ON_ERROR_STOP=1 -c \
+        "SELECT claude_env_recovery_plan('$WIN_USER','$USER')::text" 2>/dev/null)" \
+        || { err "could not fetch plan from PG; falling back to built-in defaults"; plan_json=""; }
+    if [[ -n "$plan_json" ]]; then
+        mapfile -t PORTABLE        < <(jq -r '.portable[]'        <<<"$plan_json")
+        mapfile -t PORTABLE_REVIEW < <(jq -r '.portable_review[]' <<<"$plan_json")
+        mapfile -t SKIP            < <(jq -r '.skip[]'            <<<"$plan_json")
+        log "plan sourced from PG (schema_version=$(jq -r '.schema_version' <<<"$plan_json"))"
+    fi
+fi
 
 # ---------- copy portable items ----------
 copy_item() {
